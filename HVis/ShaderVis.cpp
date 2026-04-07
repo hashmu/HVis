@@ -1116,21 +1116,25 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 
     // === SHOCKWAVE RINGS (bass/kick hits) ===
     for (int ri = 0; ri < 4; ri++) {
-        float ringPhase = frac(time * (1.5 + ri * 0.4) + (float)ri * 0.25);
-        float ringR = ringPhase * 1.2;
-        float ringWidth = 0.015 + bassGate * 0.02;
+        float ringSpeed = 2.0 + bass * 3.0 + (float)ri * 0.5;
+        float ringPhase = frac(time * ringSpeed * 0.3 + (float)ri * 0.25);
+        float ringR = ringPhase * (0.8 + bass * 0.6);
+        float ringWidth = 0.01 + bass * 0.025;
         float ring = smoothstep(ringWidth, 0.0, abs(r - ringR));
-        ring *= 1.0 - ringPhase;
-        ring *= bassGate + bass * 0.5;
+        ring *= (1.0 - ringPhase);
+        ring *= bass * 1.5;
 
-        float3 ringCol = lerp(palA, palB, ringPhase);
-        col += ringCol * ring * 2.0;
+        float3 ringCol = lerp(palA, palB, ringPhase + (float)ri * 0.2);
+        col += ringCol * ring * 2.5;
     }
 
-    // === HEXAGONAL GRID ===
-    float gridScale = 6.0 + sin(time * 0.3) * 0.5;
+    // === HEXAGONAL GRID (rotates and breathes) ===
+    float gridRot = time * 0.15 + mid * 0.3;
+    float gc = cos(gridRot), gs = sin(gridRot);
+    float2 gridP = float2(p.x * gc - p.y * gs, p.x * gs + p.y * gc);
+    float gridScale = 5.0 + sin(time * 0.5) * 1.0 + bass * 1.0;
     float2 hexCell;
-    float2 hexUV = hexGrid(p * gridScale, hexCell);
+    float2 hexUV = hexGrid(gridP * gridScale, hexCell);
     float hexHash = hash(hexCell);
     float hexDist = length(hexUV - 0.5);
 
@@ -1201,10 +1205,10 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float edgeWave = sin(a * 8.0 + time * 6.0) * 0.5 + 0.5;
     col += palB * 0.6 * edge * edgeWave * guitar * 2.0;
 
-    // === Treble sparkles ===
-    float sparkle = hash(floor(uv * resolution * 0.25) + floor(time * 20.0));
-    sparkle = step(0.97, sparkle) * trebGate;
-    col += palC * sparkle * 2.0;
+    // === Treble sparkles (single-pixel, rare) ===
+    float sparkle = hash(floor(uv * resolution) + floor(time * 30.0));
+    sparkle = step(0.995, sparkle) * trebGate * treble;
+    col += palC * sparkle * 1.5;
 
     // === Overall ===
     // Desaturate slightly when quiet, full color when loud
