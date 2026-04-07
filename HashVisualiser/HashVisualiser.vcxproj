@@ -80,6 +80,7 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="AudioCapture.cpp" />
+    <ClCompile Include="ShaderVis.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui_draw.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui_tables.cpp" />
@@ -89,6 +90,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AudioCapture.h" />
+    <ClInclude Include="ShaderVis.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

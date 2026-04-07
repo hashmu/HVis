@@ -1,4 +1,5 @@
 #include "AudioCapture.h"
+#include "ShaderVis.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -65,6 +66,16 @@ static void DrainMessageQueue() {
 }
 
 static bool g_audioOk = false;
+static ShaderVis g_shaderVis;
+static float g_time = 0.0f;
+static LARGE_INTEGER g_perfFreq = {};
+static LARGE_INTEGER g_perfStart = {};
+
+// Vis mode: 0 = waveform/spectrum, 1+ = shader modes
+static int g_visMode = 0;
+
+// Audio analysis output
+static AudioParams g_audioParams = {};
 
 // Audio
 static AudioCapture g_audioCapture;
@@ -136,52 +147,45 @@ static void PollAudio() {
     for (int i = 0; i < FFT_SIZE / 2; i++) {
         g_fftSmoothed[i] = g_fftSmoothed[i] * 0.7f + g_fftMagnitude[i] * 0.3f;
     }
+
+    // Compute audio params for shaders
+    int halfFFT = FFT_SIZE / 2;
+    // Bass (0-300Hz), Mid (300-2kHz), Treble (2k-20kHz)
+    float sampleRate = (float)g_audioCapture.GetSampleRate();
+    if (sampleRate == 0) sampleRate = 48000;
+    int bassBin = (int)(300.0f / sampleRate * FFT_SIZE);
+    int midBin = (int)(2000.0f / sampleRate * FFT_SIZE);
+
+    float bass = 0, mid = 0, treble = 0;
+    for (int i = 0; i < halfFFT; i++) {
+        if (i < bassBin) bass += g_fftSmoothed[i];
+        else if (i < midBin) mid += g_fftSmoothed[i];
+        else treble += g_fftSmoothed[i];
+    }
+    bass = bass / (bassBin > 0 ? bassBin : 1) * 20.0f;
+    mid = mid / (midBin - bassBin > 0 ? midBin - bassBin : 1) * 30.0f;
+    treble = treble / (halfFFT - midBin > 0 ? halfFFT - midBin : 1) * 50.0f;
+
+    g_audioParams.bass = g_audioParams.bass * 0.7f + bass * 0.3f;
+    g_audioParams.mid = g_audioParams.mid * 0.7f + mid * 0.3f;
+    g_audioParams.treble = g_audioParams.treble * 0.7f + treble * 0.3f;
+    g_audioParams.energy = (g_audioParams.bass + g_audioParams.mid + g_audioParams.treble) / 3.0f;
+
+    // 32 bands (log-spaced)
+    for (int i = 0; i < 32; i++) {
+        float t0 = (float)i / 32.0f;
+        float t1 = (float)(i + 1) / 32.0f;
+        int b0 = (int)(t0 * t0 * halfFFT);
+        int b1 = (int)(t1 * t1 * halfFFT);
+        if (b1 <= b0) b1 = b0 + 1;
+        if (b1 > halfFFT) b1 = halfFFT;
+        float sum = 0;
+        for (int b = b0; b < b1; b++) sum += g_fftSmoothed[b];
+        g_audioParams.bands[i] = sum / (b1 - b0) * 30.0f;
+    }
 }
 
-void RenderFrame() {
-    // Handle pending resize from WM_SIZE (main thread sets the flag, we do the D3D work)
-    EnterCriticalSection(&g_resizeCS);
-    if (g_needResize) {
-        CleanupRenderTarget();
-        g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
-        CreateRenderTarget();
-        g_needResize = false;
-    }
-    LeaveCriticalSection(&g_resizeCS);
-
-    if (g_audioOk) PollAudio();
-
-    // Replay queued Win32 messages for ImGui input (thread-safe)
-    DrainMessageQueue();
-
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-
-    ImGuiIO& io = ImGui::GetIO();
-
-    // Fullscreen window
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::Begin("##Main", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    float windowW = ImGui::GetContentRegionAvail().x;
-    float windowH = ImGui::GetContentRegionAvail().y;
-
-    // Title
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Hash Visualiser");
-    ImGui::SameLine(windowW - 200);
-    if (g_audioOk) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI Loopback: %dHz %dch",
-            g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: Not Available");
-    }
-    ImGui::Separator();
-
+static void DrawWaveformSpectrum(float windowW, float windowH) {
     float panelH = (windowH - 40) * 0.5f;
 
     // --- Waveform ---
@@ -281,6 +285,86 @@ void RenderFrame() {
             IM_COL32(60, 60, 80, 255));
         ImGui::Dummy(size);
     }
+}
+
+void RenderFrame() {
+    // Handle pending resize
+    EnterCriticalSection(&g_resizeCS);
+    if (g_needResize) {
+        CleanupRenderTarget();
+        g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        CreateRenderTarget();
+        g_needResize = false;
+    }
+    LeaveCriticalSection(&g_resizeCS);
+
+    // Update time
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_time = (float)(now.QuadPart - g_perfStart.QuadPart) / (float)g_perfFreq.QuadPart;
+
+    if (g_audioOk) PollAudio();
+
+    // Update shader vis
+    g_shaderVis.Update(g_time, g_audioParams);
+
+    DrainMessageQueue();
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Fullscreen window
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("##Main", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    float windowW = ImGui::GetContentRegionAvail().x;
+    float windowH = ImGui::GetContentRegionAvail().y;
+
+    // Header bar
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "HVis");
+
+    // Vis mode tabs
+    ImGui::SameLine(160);
+    if (ImGui::SmallButton("Waveform/Spectrum")) g_visMode = 0;
+    for (int i = 0; i < g_shaderVis.GetShaderCount(); i++) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(g_shaderVis.GetShaderName(i))) {
+            g_visMode = 1 + i;
+            g_shaderVis.SetShader(i);
+        }
+    }
+
+    ImGui::SameLine(windowW - 200);
+    if (g_audioOk) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI: %dHz %dch",
+            g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: N/A");
+    }
+    ImGui::Separator();
+
+    if (g_visMode == 0) {
+        DrawWaveformSpectrum(windowW, windowH);
+    } else {
+        // Shader visualization
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        UINT texW = (UINT)avail.x;
+        UINT texH = (UINT)avail.y;
+        if (texW > 0 && texH > 0) {
+            g_shaderVis.Resize(texW, texH);
+            g_shaderVis.Render();
+            ID3D11ShaderResourceView* srv = g_shaderVis.GetOutputSRV();
+            if (srv)
+                ImGui::Image((ImTextureID)srv, avail);
+        }
+    }
 
     ImGui::End();
 
@@ -291,7 +375,7 @@ void RenderFrame() {
     g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-    g_pSwapChain->Present(1, 0); // VSync
+    g_pSwapChain->Present(1, 0);
 }
 
 static DWORD WINAPI RenderThreadProc(LPVOID) {
@@ -308,10 +392,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     // Create window
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
-        nullptr, nullptr, nullptr, nullptr, L"HashVisualiser", nullptr };
+        nullptr, nullptr, nullptr, nullptr, L"HVis", nullptr };
     ::RegisterClassExW(&wc);
 
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Hash Visualiser",
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"HVis",
         WS_OVERLAPPEDWINDOW, 100, 100, 1280, 720,
         nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -340,6 +424,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
+    // Init timer
+    QueryPerformanceFrequency(&g_perfFreq);
+    QueryPerformanceCounter(&g_perfStart);
+
+    // Init shader visualisations
+    g_shaderVis.Init(g_pd3dDevice, g_pd3dDeviceContext);
+
     // Initialize audio
     g_audioOk = g_audioCapture.Initialize(true);
     if (g_audioOk) g_audioOk = g_audioCapture.Start();
@@ -363,6 +454,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     DeleteCriticalSection(&g_msgCS);
 
     // Cleanup
+    g_shaderVis.Cleanup();
     g_audioCapture.Cleanup();
 
     ImGui_ImplDX11_Shutdown();
