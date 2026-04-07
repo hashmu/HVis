@@ -60,7 +60,7 @@ bool AudioCapture::Initialize(bool loopback) {
 
     DWORD streamFlags = loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
     hr = m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags,
-        10000000, 0, m_mixFormat, nullptr);
+        200000, 0, m_mixFormat, nullptr); // 20ms buffer — minimum practical for loopback
     if (FAILED(hr)) {
         printf("[Audio] IAudioClient::Initialize failed: 0x%08X\n", hr);
         Cleanup();
@@ -80,7 +80,7 @@ bool AudioCapture::Initialize(bool loopback) {
         if (FAILED(hr)) { Cleanup(); return false; }
 
         hr = m_renderAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
-            10000000, 0, m_mixFormat, nullptr);
+            200000, 0, m_mixFormat, nullptr);
         if (FAILED(hr)) { Cleanup(); return false; }
 
         hr = m_renderAudioClient->GetBufferSize(&m_renderBufferFrameCount);

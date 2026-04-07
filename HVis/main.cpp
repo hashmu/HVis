@@ -98,8 +98,8 @@ static const int WAVEFORM_SIZE = 2048;
 static float g_waveform[WAVEFORM_SIZE] = {};
 static int g_waveformPos = 0;
 
-// FFT
-static const int FFT_SIZE = 2048;
+// FFT — 1024 = ~21ms at 48kHz, good balance of latency vs frequency resolution
+static const int FFT_SIZE = 1024;
 static float g_fftInput[FFT_SIZE] = {};
 static float g_fftMagnitude[FFT_SIZE / 2] = {};
 static float g_fftSmoothed[FFT_SIZE / 2] = {};
