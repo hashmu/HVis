@@ -1,0 +1,28 @@
+# Build outputs
+x64/
+Debug/
+Release/
+
+# MSVC intermediates
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.pch
+*.ipch
+*.log
+*.tlog/
+
+# VS user/local files
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.db
+*.opendb
+.vs/
+
+# vcpkg installed packages
+vcpkg_installed/
