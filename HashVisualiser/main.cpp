@@ -24,8 +24,47 @@ bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
+void RenderFrame();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Render thread state
+static HANDLE g_renderThread = nullptr;
+static volatile bool g_renderThreadRunning = false;
+static CRITICAL_SECTION g_resizeCS;
+static volatile bool g_needResize = false;
+static UINT g_resizeWidth = 0;
+static UINT g_resizeHeight = 0;
+
+// Message queue — WndProc pushes, render thread replays for ImGui
+struct QueuedMsg { HWND hwnd; UINT msg; WPARAM wParam; LPARAM lParam; };
+static const int MSG_QUEUE_SIZE = 256;
+static QueuedMsg g_msgQueue[MSG_QUEUE_SIZE];
+static volatile LONG g_msgQueueHead = 0; // written by main thread
+static volatile LONG g_msgQueueTail = 0; // read by render thread
+static CRITICAL_SECTION g_msgCS;
+
+static void QueueWinMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    EnterCriticalSection(&g_msgCS);
+    LONG next = (g_msgQueueHead + 1) % MSG_QUEUE_SIZE;
+    if (next != g_msgQueueTail) { // drop if full
+        g_msgQueue[g_msgQueueHead] = { hwnd, msg, wParam, lParam };
+        g_msgQueueHead = next;
+    }
+    LeaveCriticalSection(&g_msgCS);
+}
+
+static void DrainMessageQueue() {
+    EnterCriticalSection(&g_msgCS);
+    while (g_msgQueueTail != g_msgQueueHead) {
+        QueuedMsg& m = g_msgQueue[g_msgQueueTail];
+        ImGui_ImplWin32_WndProcHandler(m.hwnd, m.msg, m.wParam, m.lParam);
+        g_msgQueueTail = (g_msgQueueTail + 1) % MSG_QUEUE_SIZE;
+    }
+    LeaveCriticalSection(&g_msgCS);
+}
+
+static bool g_audioOk = false;
 
 // Audio
 static AudioCapture g_audioCapture;
@@ -99,7 +138,174 @@ static void PollAudio() {
     }
 }
 
+void RenderFrame() {
+    // Handle pending resize from WM_SIZE (main thread sets the flag, we do the D3D work)
+    EnterCriticalSection(&g_resizeCS);
+    if (g_needResize) {
+        CleanupRenderTarget();
+        g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        CreateRenderTarget();
+        g_needResize = false;
+    }
+    LeaveCriticalSection(&g_resizeCS);
+
+    if (g_audioOk) PollAudio();
+
+    // Replay queued Win32 messages for ImGui input (thread-safe)
+    DrainMessageQueue();
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Fullscreen window
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("##Main", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    float windowW = ImGui::GetContentRegionAvail().x;
+    float windowH = ImGui::GetContentRegionAvail().y;
+
+    // Title
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Hash Visualiser");
+    ImGui::SameLine(windowW - 200);
+    if (g_audioOk) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI Loopback: %dHz %dch",
+            g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: Not Available");
+    }
+    ImGui::Separator();
+
+    float panelH = (windowH - 40) * 0.5f;
+
+    // --- Waveform ---
+    ImGui::Text("Waveform");
+    {
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImVec2 size(windowW, panelH - 30);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            IM_COL32(10, 10, 15, 255));
+
+        float cy = pos.y + size.y * 0.5f;
+        dl->AddLine(ImVec2(pos.x, cy), ImVec2(pos.x + size.x, cy),
+            IM_COL32(40, 40, 60, 255));
+
+        float prevY = cy;
+        for (int i = 0; i < (int)size.x; i++) {
+            int idx = (g_waveformPos + (i * WAVEFORM_SIZE / (int)size.x)) % WAVEFORM_SIZE;
+            float sample = g_waveform[idx];
+            float y = cy - sample * size.y * 0.45f;
+
+            if (i > 0) {
+                float amp = fabsf(sample);
+                int r = (int)(80 + amp * 175);
+                int g = (int)(180 - amp * 80);
+                int b = (int)(255 - amp * 100);
+                dl->AddLine(ImVec2(pos.x + i - 1, prevY), ImVec2(pos.x + i, y),
+                    IM_COL32(r, g, b, 255), 1.5f);
+            }
+            prevY = y;
+        }
+
+        dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            IM_COL32(60, 60, 80, 255));
+        ImGui::Dummy(size);
+    }
+
+    ImGui::Spacing();
+
+    // --- Spectrum ---
+    ImGui::Text("Spectrum");
+    {
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImVec2 size(windowW, panelH - 30);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            IM_COL32(10, 10, 15, 255));
+
+        int numBars = 128;
+        float barW = size.x / numBars;
+        int halfFFT = FFT_SIZE / 2;
+
+        for (int i = 0; i < numBars; i++) {
+            float t = (float)i / numBars;
+            int binStart = (int)(powf(t, 2.0f) * halfFFT);
+            int binEnd = (int)(powf((float)(i + 1) / numBars, 2.0f) * halfFFT);
+            if (binEnd <= binStart) binEnd = binStart + 1;
+            if (binEnd > halfFFT) binEnd = halfFFT;
+
+            float mag = 0.0f;
+            int count = 0;
+            for (int b = binStart; b < binEnd; b++) {
+                mag += g_fftSmoothed[b];
+                count++;
+            }
+            if (count > 0) mag /= count;
+
+            float dB = 20.0f * log10f(mag + 1e-6f);
+            float norm = (dB + 60.0f) / 60.0f;
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+
+            float barH = norm * size.y * 0.95f;
+            float x = pos.x + i * barW;
+            float y = pos.y + size.y - barH;
+
+            int r, g, b;
+            if (norm < 0.5f) {
+                float f = norm * 2.0f;
+                r = (int)(30 * f);
+                g = (int)(100 + 155 * f);
+                b = (int)(255 - 100 * f);
+            } else {
+                float f = (norm - 0.5f) * 2.0f;
+                r = (int)(30 + 225 * f);
+                g = (int)(255 - 155 * f);
+                b = (int)(155 - 155 * f);
+            }
+
+            dl->AddRectFilled(ImVec2(x + 1, y), ImVec2(x + barW - 1, pos.y + size.y),
+                IM_COL32(r, g, b, 220));
+        }
+
+        dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            IM_COL32(60, 60, 80, 255));
+        ImGui::Dummy(size);
+    }
+
+    ImGui::End();
+
+    // Render
+    ImGui::Render();
+    const float clearColor[4] = { 0.04f, 0.04f, 0.06f, 1.0f };
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    g_pSwapChain->Present(1, 0); // VSync
+}
+
+static DWORD WINAPI RenderThreadProc(LPVOID) {
+    while (g_renderThreadRunning) {
+        RenderFrame();
+    }
+    return 0;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    // Init critical sections before anything that can trigger WndProc
+    InitializeCriticalSection(&g_resizeCS);
+    InitializeCriticalSection(&g_msgCS);
+
     // Create window
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance,
         nullptr, nullptr, nullptr, nullptr, L"HashVisualiser", nullptr };
@@ -135,176 +341,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     // Initialize audio
-    bool audioOk = g_audioCapture.Initialize(true);
-    if (audioOk) audioOk = g_audioCapture.Start();
+    g_audioOk = g_audioCapture.Initialize(true);
+    if (g_audioOk) g_audioOk = g_audioCapture.Start();
 
-    const float clearColor[4] = { 0.04f, 0.04f, 0.06f, 1.0f };
+    // Start render thread
+    g_renderThreadRunning = true;
+    g_renderThread = CreateThread(nullptr, 0, RenderThreadProc, nullptr, 0, nullptr);
 
-    // Main loop
-    bool done = false;
-    while (!done) {
-        MSG msg;
-        while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-            ::TranslateMessage(&msg);
-            ::DispatchMessage(&msg);
-            if (msg.message == WM_QUIT) done = true;
-        }
-        if (done) break;
-
-        // Poll audio
-        if (audioOk) PollAudio();
-
-        // Start ImGui frame
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
-        // Fullscreen window
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin("##Main", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-        float windowW = ImGui::GetContentRegionAvail().x;
-        float windowH = ImGui::GetContentRegionAvail().y;
-
-        // Title
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Hash Visualiser");
-        ImGui::SameLine(windowW - 200);
-        if (audioOk) {
-            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI Loopback: %dHz %dch",
-                g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: Not Available");
-        }
-        ImGui::Separator();
-
-        float panelH = (windowH - 40) * 0.5f;
-
-        // --- Waveform ---
-        ImGui::Text("Waveform");
-        {
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            ImVec2 size(windowW, panelH - 30);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-
-            // Background
-            dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                IM_COL32(10, 10, 15, 255));
-
-            // Center line
-            float cy = pos.y + size.y * 0.5f;
-            dl->AddLine(ImVec2(pos.x, cy), ImVec2(pos.x + size.x, cy),
-                IM_COL32(40, 40, 60, 255));
-
-            // Draw waveform
-            int step = WAVEFORM_SIZE / (int)size.x;
-            if (step < 1) step = 1;
-            float prevY = cy;
-            for (int i = 0; i < (int)size.x; i++) {
-                int idx = (g_waveformPos + (i * WAVEFORM_SIZE / (int)size.x)) % WAVEFORM_SIZE;
-                float sample = g_waveform[idx];
-                float y = cy - sample * size.y * 0.45f;
-
-                if (i > 0) {
-                    // Color based on amplitude
-                    float amp = fabsf(sample);
-                    int r = (int)(80 + amp * 175);
-                    int g = (int)(180 - amp * 80);
-                    int b = (int)(255 - amp * 100);
-                    dl->AddLine(ImVec2(pos.x + i - 1, prevY), ImVec2(pos.x + i, y),
-                        IM_COL32(r, g, b, 255), 1.5f);
-                }
-                prevY = y;
-            }
-
-            // Border
-            dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                IM_COL32(60, 60, 80, 255));
-
-            ImGui::Dummy(size);
-        }
-
-        ImGui::Spacing();
-
-        // --- Spectrum ---
-        ImGui::Text("Spectrum");
-        {
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            ImVec2 size(windowW, panelH - 30);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-
-            dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                IM_COL32(10, 10, 15, 255));
-
-            // Draw spectrum bars (logarithmic frequency grouping)
-            int numBars = 128;
-            float barW = size.x / numBars;
-            int halfFFT = FFT_SIZE / 2;
-
-            for (int i = 0; i < numBars; i++) {
-                // Log-scale frequency mapping
-                float t = (float)i / numBars;
-                int binStart = (int)(powf(t, 2.0f) * halfFFT);
-                int binEnd = (int)(powf((float)(i + 1) / numBars, 2.0f) * halfFFT);
-                if (binEnd <= binStart) binEnd = binStart + 1;
-                if (binEnd > halfFFT) binEnd = halfFFT;
-
-                // Average bins in range
-                float mag = 0.0f;
-                int count = 0;
-                for (int b = binStart; b < binEnd; b++) {
-                    mag += g_fftSmoothed[b];
-                    count++;
-                }
-                if (count > 0) mag /= count;
-
-                // Scale for visibility
-                float dB = 20.0f * log10f(mag + 1e-6f);
-                float norm = (dB + 60.0f) / 60.0f; // -60dB to 0dB range
-                if (norm < 0.0f) norm = 0.0f;
-                if (norm > 1.0f) norm = 1.0f;
-
-                float barH = norm * size.y * 0.95f;
-                float x = pos.x + i * barW;
-                float y = pos.y + size.y - barH;
-
-                // Gradient color: blue -> cyan -> green -> yellow -> red
-                int r, g, b;
-                if (norm < 0.5f) {
-                    float f = norm * 2.0f;
-                    r = (int)(30 * f);
-                    g = (int)(100 + 155 * f);
-                    b = (int)(255 - 100 * f);
-                } else {
-                    float f = (norm - 0.5f) * 2.0f;
-                    r = (int)(30 + 225 * f);
-                    g = (int)(255 - 155 * f);
-                    b = (int)(155 - 155 * f);
-                }
-
-                dl->AddRectFilled(ImVec2(x + 1, y), ImVec2(x + barW - 1, pos.y + size.y),
-                    IM_COL32(r, g, b, 220));
-            }
-
-            dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                IM_COL32(60, 60, 80, 255));
-
-            ImGui::Dummy(size);
-        }
-
-        ImGui::End();
-
-        // Render
-        ImGui::Render();
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        g_pSwapChain->Present(1, 0); // VSync
+    // Main loop — just pumps messages, rendering happens on the other thread
+    MSG msg;
+    while (::GetMessage(&msg, nullptr, 0, 0)) {
+        ::TranslateMessage(&msg);
+        ::DispatchMessage(&msg);
     }
+
+    // Stop render thread
+    g_renderThreadRunning = false;
+    WaitForSingleObject(g_renderThread, INFINITE);
+    CloseHandle(g_renderThread);
+    DeleteCriticalSection(&g_resizeCS);
+    DeleteCriticalSection(&g_msgCS);
 
     // Cleanup
     g_audioCapture.Cleanup();
@@ -314,7 +370,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ImGui::DestroyContext();
 
     CleanupDeviceD3D();
-    ::DestroyWindow(hwnd);
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
 
     return 0;
@@ -364,16 +419,18 @@ void CleanupRenderTarget() {
 }
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-        return true;
+    // Queue input messages for the render thread to process
+    QueueWinMessage(hWnd, msg, wParam, lParam);
 
     switch (msg) {
     case WM_SIZE:
         if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
-            CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam),
-                DXGI_FORMAT_UNKNOWN, 0);
-            CreateRenderTarget();
+            // Signal the render thread to do the resize
+            EnterCriticalSection(&g_resizeCS);
+            g_resizeWidth = (UINT)LOWORD(lParam);
+            g_resizeHeight = (UINT)HIWORD(lParam);
+            g_needResize = true;
+            LeaveCriticalSection(&g_resizeCS);
         }
         return 0;
     case WM_DESTROY:
