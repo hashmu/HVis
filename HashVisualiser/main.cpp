@@ -1,5 +1,6 @@
 #include "AudioCapture.h"
 #include "ShaderVis.h"
+#include "PostProcess.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -76,6 +77,10 @@ static int g_visMode = 0;
 
 // Audio analysis output
 static AudioParams g_audioParams = {};
+
+static PostProcess g_postProcess;
+static PostProcessSettings g_ppSettings;
+static bool g_showPostFX = false;
 
 // Audio
 static AudioCapture g_audioCapture;
@@ -341,6 +346,12 @@ void RenderFrame() {
         }
     }
 
+    ImGui::SameLine();
+    if (g_visMode > 0) {
+        if (ImGui::SmallButton(g_showPostFX ? "PostFX [-]" : "PostFX [+]"))
+            g_showPostFX = !g_showPostFX;
+    }
+
     ImGui::SameLine(windowW - 200);
     if (g_audioOk) {
         ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI: %dHz %dch",
@@ -353,20 +364,98 @@ void RenderFrame() {
     if (g_visMode == 0) {
         DrawWaveformSpectrum(windowW, windowH);
     } else {
-        // Shader visualization
+        // Shader visualization + post-processing
         ImVec2 avail = ImGui::GetContentRegionAvail();
         UINT texW = (UINT)avail.x;
         UINT texH = (UINT)avail.y;
         if (texW > 0 && texH > 0) {
             g_shaderVis.Resize(texW, texH);
             g_shaderVis.Render();
-            ID3D11ShaderResourceView* srv = g_shaderVis.GetOutputSRV();
+
+            // Post-process pass
+            g_postProcess.Resize(texW, texH);
+            g_postProcess.Apply(g_shaderVis.GetOutputSRV(), g_time,
+                g_audioParams.bass, g_audioParams.mid,
+                g_audioParams.treble, g_audioParams.energy, g_ppSettings);
+
+            ID3D11ShaderResourceView* srv = g_postProcess.GetOutputSRV();
             if (srv)
                 ImGui::Image((ImTextureID)srv, avail);
         }
     }
 
     ImGui::End();
+
+    // --- PostFX settings window ---
+    if (g_showPostFX && g_visMode > 0) {
+        ImGui::SetNextWindowSize(ImVec2(320, 520), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Post Processing", &g_showPostFX);
+
+        PostProcessSettings& s = g_ppSettings;
+
+        if (ImGui::CollapsingHeader("Bloom", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Enable##bloom", &s.bloom);
+            ImGui::SliderFloat("Intensity##bloom", &s.bloomIntensity, 0.0f, 2.0f);
+            ImGui::SliderFloat("Threshold##bloom", &s.bloomThreshold, 0.0f, 1.0f);
+            ImGui::Checkbox("Audio Reactive##bloom", &s.bloomAudioReactive);
+        }
+
+        if (ImGui::CollapsingHeader("Chromatic Aberration")) {
+            ImGui::Checkbox("Enable##ca", &s.chromaticAberration);
+            ImGui::SliderFloat("Intensity##ca", &s.caIntensity, 0.0f, 0.02f);
+            ImGui::Checkbox("Audio Reactive##ca", &s.caAudioReactive);
+        }
+
+        if (ImGui::CollapsingHeader("Feedback Trails")) {
+            ImGui::Checkbox("Enable##fb", &s.feedback);
+            ImGui::SliderFloat("Trail Amount##fb", &s.feedbackAmount, 0.5f, 0.99f);
+            ImGui::Checkbox("Audio Reactive##fb", &s.feedbackAudioReactive);
+        }
+
+        if (ImGui::CollapsingHeader("Radial Blur")) {
+            ImGui::Checkbox("Enable##rb", &s.radialBlur);
+            ImGui::SliderFloat("Intensity##rb", &s.radialBlurIntensity, 0.0f, 0.1f);
+            ImGui::Checkbox("Audio Reactive##rb", &s.radialBlurAudioReactive);
+        }
+
+        if (ImGui::CollapsingHeader("Film Grain")) {
+            ImGui::Checkbox("Enable##grain", &s.filmGrain);
+            ImGui::SliderFloat("Intensity##grain", &s.grainIntensity, 0.0f, 0.3f);
+            ImGui::Checkbox("Audio Reactive##grain", &s.grainAudioReactive);
+        }
+
+        if (ImGui::CollapsingHeader("Scanlines")) {
+            ImGui::Checkbox("Enable##scan", &s.scanlines);
+            ImGui::SliderFloat("Intensity##scan", &s.scanlineIntensity, 0.0f, 0.5f);
+        }
+
+        if (ImGui::CollapsingHeader("Vignette")) {
+            ImGui::Checkbox("Enable##vig", &s.vignette);
+            ImGui::SliderFloat("Intensity##vig", &s.vignetteIntensity, 0.0f, 3.0f);
+        }
+
+        if (ImGui::CollapsingHeader("Color Grading")) {
+            ImGui::Checkbox("Enable##cg", &s.colorGrading);
+            ImGui::SliderFloat("Temperature", &s.temperature, -1.0f, 1.0f);
+            ImGui::SliderFloat("Contrast", &s.contrast, 0.5f, 2.0f);
+            ImGui::SliderFloat("Saturation", &s.saturation, 0.0f, 2.0f);
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Save Settings"))
+            g_ppSettings.Save("postfx.cfg");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Defaults")) {
+            g_ppSettings = PostProcessSettings();
+            g_ppSettings.Save("postfx.cfg");
+        }
+
+        ImGui::End();
+
+        // Auto-save when window is closed
+        if (!g_showPostFX)
+            g_ppSettings.Save("postfx.cfg");
+    }
 
     // Render
     ImGui::Render();
@@ -430,6 +519,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     // Init shader visualisations
     g_shaderVis.Init(g_pd3dDevice, g_pd3dDeviceContext);
+    g_postProcess.Init(g_pd3dDevice, g_pd3dDeviceContext);
+    g_ppSettings.Load("postfx.cfg");
 
     // Initialize audio
     g_audioOk = g_audioCapture.Initialize(true);
@@ -454,6 +545,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     DeleteCriticalSection(&g_msgCS);
 
     // Cleanup
+    g_postProcess.Cleanup();
     g_shaderVis.Cleanup();
     g_audioCapture.Cleanup();
 

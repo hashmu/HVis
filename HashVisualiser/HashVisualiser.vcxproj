@@ -81,6 +81,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="AudioCapture.cpp" />
     <ClCompile Include="ShaderVis.cpp" />
+    <ClCompile Include="PostProcess.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui_draw.cpp" />
     <ClCompile Include="C:\dev\imgui-1.92.3\imgui_tables.cpp" />
@@ -91,6 +92,7 @@
   <ItemGroup>
     <ClInclude Include="AudioCapture.h" />
     <ClInclude Include="ShaderVis.h" />
+    <ClInclude Include="PostProcess.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
