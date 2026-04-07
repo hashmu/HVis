@@ -156,8 +156,25 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         col = lerp(iterCol, trapCol * trap1, trapMix);
         col += trapAx1 * float3(0.15, 0.1, 0.3) * (0.5 + bass * 0.5);
     } else {
-        float glow = exp(-minDist * 0.3) * (0.2 + energy * 0.4);
-        col = float3(glow * 0.15, glow * 0.08, glow * 0.35);
+        // Interior: use final z position and orbit trap data for structure
+        float zLen = length(z);
+        float zAngle = atan2(z.y, z.x);
+        float trapGlow = exp(-minDist * 0.5);
+        float axGlow = exp(-minDistAx * 3.0);
+
+        // Final z creates basin-like patterns
+        float3 inner = pal(zAngle * 0.3 + zLen * 0.5 + time * 0.08,
+            float3(0.5, 0.5, 0.5), float3(0.5, 0.5, 0.5),
+            float3(0.8, 0.6, 1.0), float3(0.20, 0.10, 0.30));
+
+        // Orbit trap creates filament glow
+        float3 trapInner = pal(minDist * 2.0 + time * 0.1,
+            float3(0.5, 0.5, 0.5), float3(0.5, 0.5, 0.5),
+            float3(1.0, 0.7, 0.4), float3(0.00, 0.33, 0.67));
+
+        col = inner * 0.15 * (0.3 + energy * 0.7)
+            + trapInner * trapGlow * 0.4
+            + axGlow * float3(0.1, 0.05, 0.25) * (0.3 + bass * 0.4);
     }
 
     // --- Color the next target (same palette logic) ---
@@ -179,8 +196,14 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         col2 = lerp(iterCol2, trapCol2 * trap2val, trapMix);
         col2 += saturate(1.0 - minDistAx2 * 3.0) * float3(0.15, 0.1, 0.3) * (0.5 + bass * 0.5);
     } else {
-        float glow2 = exp(-minDist2 * 0.3) * (0.2 + energy * 0.4);
-        col2 = float3(glow2 * 0.15, glow2 * 0.08, glow2 * 0.35);
+        float trapGlow2 = exp(-minDist2 * 0.5);
+        float axGlow2 = exp(-minDistAx2 * 3.0);
+        float3 trapInner2 = pal(minDist2 * 2.0 + time * 0.1,
+            float3(0.5, 0.5, 0.5), float3(0.5, 0.5, 0.5),
+            float3(1.0, 0.7, 0.4), float3(0.00, 0.33, 0.67));
+        col2 = trapInner2 * trapGlow2 * 0.4
+            + axGlow2 * float3(0.1, 0.05, 0.25) * (0.3 + bass * 0.4);
+        col2 *= 0.3 + energy * 0.7;
     }
 
     // --- Crossfade with a bright flash at the transition ---
