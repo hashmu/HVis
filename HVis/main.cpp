@@ -82,6 +82,12 @@ static PostProcess g_postProcess;
 static PostProcessSettings g_ppSettings;
 static bool g_showPostFX = false;
 
+// AGC (automatic gain control) — per-band peak tracking
+static float g_bandPeak[32] = {};       // running peak per band
+static float g_bassPeak = 0.001f;
+static float g_midPeak = 0.001f;
+static float g_treblePeak = 0.001f;
+
 // Audio
 static AudioCapture g_audioCapture;
 static const UINT32 AUDIO_BUFFER_SAMPLES = 48000 * 2; // 1 second stereo
@@ -148,35 +154,69 @@ static void PollAudio() {
     ApplyHannWindow(g_fftInput, FFT_SIZE);
     ComputeFFT(g_fftInput, g_fftMagnitude, FFT_SIZE);
 
-    // Smooth spectrum
+    // Smooth spectrum — faster attack, slower release (good for transients)
     for (int i = 0; i < FFT_SIZE / 2; i++) {
-        g_fftSmoothed[i] = g_fftSmoothed[i] * 0.7f + g_fftMagnitude[i] * 0.3f;
+        float raw = g_fftMagnitude[i];
+        if (raw > g_fftSmoothed[i])
+            g_fftSmoothed[i] = g_fftSmoothed[i] * 0.3f + raw * 0.7f;  // fast attack
+        else
+            g_fftSmoothed[i] = g_fftSmoothed[i] * 0.85f + raw * 0.15f; // slow release
     }
 
-    // Compute audio params for shaders
+    // --- Perceptual frequency weighting (approximate A-weighting) ---
+    // Higher frequencies have less raw FFT energy but are perceptually important.
+    // This curve boosts upper mids/treble to compensate.
     int halfFFT = FFT_SIZE / 2;
-    // Bass (0-300Hz), Mid (300-2kHz), Treble (2k-20kHz)
     float sampleRate = (float)g_audioCapture.GetSampleRate();
     if (sampleRate == 0) sampleRate = 48000;
-    int bassBin = (int)(300.0f / sampleRate * FFT_SIZE);
-    int midBin = (int)(2000.0f / sampleRate * FFT_SIZE);
 
-    float bass = 0, mid = 0, treble = 0;
+    // Weighted spectrum for analysis
+    static float weighted[FFT_SIZE / 2];
     for (int i = 0; i < halfFFT; i++) {
-        if (i < bassBin) bass += g_fftSmoothed[i];
-        else if (i < midBin) mid += g_fftSmoothed[i];
-        else treble += g_fftSmoothed[i];
+        float freq = (float)i * sampleRate / FFT_SIZE;
+        // A-weight approximation: boost 1k-6k, roll off sub-bass and ultra-high
+        float w = 1.0f;
+        if (freq < 200.0f)       w = 0.5f + 0.5f * (freq / 200.0f);       // gentle sub-bass rolloff
+        else if (freq < 1000.0f) w = 1.0f;                                  // flat low-mid
+        else if (freq < 4000.0f) w = 1.0f + 1.5f * ((freq - 1000.0f) / 3000.0f); // boost presence
+        else if (freq < 8000.0f) w = 2.5f;                                  // presence peak
+        else                     w = 2.5f - 1.0f * ((freq - 8000.0f) / 12000.0f); // gentle air rolloff
+        if (w < 0.3f) w = 0.3f;
+        weighted[i] = g_fftSmoothed[i] * w;
     }
-    bass = bass / (bassBin > 0 ? bassBin : 1) * 20.0f;
-    mid = mid / (midBin - bassBin > 0 ? midBin - bassBin : 1) * 30.0f;
-    treble = treble / (halfFFT - midBin > 0 ? halfFFT - midBin : 1) * 50.0f;
 
-    g_audioParams.bass = g_audioParams.bass * 0.7f + bass * 0.3f;
-    g_audioParams.mid = g_audioParams.mid * 0.7f + mid * 0.3f;
-    g_audioParams.treble = g_audioParams.treble * 0.7f + treble * 0.3f;
+    // --- Bass / Mid / Treble with AGC ---
+    int bassBin = (int)(300.0f / sampleRate * FFT_SIZE);
+    int midBin  = (int)(2000.0f / sampleRate * FFT_SIZE);
+
+    float bassRaw = 0, midRaw = 0, trebleRaw = 0;
+    for (int i = 0; i < halfFFT; i++) {
+        if (i < bassBin) bassRaw += weighted[i];
+        else if (i < midBin) midRaw += weighted[i];
+        else trebleRaw += weighted[i];
+    }
+    bassRaw   /= (bassBin > 0 ? bassBin : 1);
+    midRaw    /= (midBin - bassBin > 0 ? midBin - bassBin : 1);
+    trebleRaw /= (halfFFT - midBin > 0 ? halfFFT - midBin : 1);
+
+    // AGC: track peaks with slow decay, normalize to 0-1 range
+    float agcDecay = 0.998f;  // ~5 second half-life at 60fps
+    float agcFloor = 0.001f;  // minimum peak to avoid division by near-zero
+    g_bassPeak   = fmaxf(fmaxf(g_bassPeak * agcDecay, bassRaw), agcFloor);
+    g_midPeak    = fmaxf(fmaxf(g_midPeak * agcDecay, midRaw), agcFloor);
+    g_treblePeak = fmaxf(fmaxf(g_treblePeak * agcDecay, trebleRaw), agcFloor);
+
+    float bassNorm   = bassRaw / g_bassPeak;
+    float midNorm    = midRaw / g_midPeak;
+    float trebleNorm = trebleRaw / g_treblePeak;
+
+    // Per-band smoothing: bass = smooth, mid = medium, treble = snappy
+    g_audioParams.bass   = g_audioParams.bass * 0.75f + bassNorm * 0.25f;
+    g_audioParams.mid    = g_audioParams.mid * 0.6f + midNorm * 0.4f;
+    g_audioParams.treble = g_audioParams.treble * 0.4f + trebleNorm * 0.6f;
     g_audioParams.energy = (g_audioParams.bass + g_audioParams.mid + g_audioParams.treble) / 3.0f;
 
-    // 32 bands (log-spaced)
+    // --- 32 bands: log-spaced, perceptually weighted, with per-band AGC ---
     for (int i = 0; i < 32; i++) {
         float t0 = (float)i / 32.0f;
         float t1 = (float)(i + 1) / 32.0f;
@@ -184,9 +224,23 @@ static void PollAudio() {
         int b1 = (int)(t1 * t1 * halfFFT);
         if (b1 <= b0) b1 = b0 + 1;
         if (b1 > halfFFT) b1 = halfFFT;
+
         float sum = 0;
-        for (int b = b0; b < b1; b++) sum += g_fftSmoothed[b];
-        g_audioParams.bands[i] = sum / (b1 - b0) * 30.0f;
+        for (int b = b0; b < b1; b++) sum += weighted[b];
+        float avg = sum / (b1 - b0);
+
+        // Per-band AGC
+        g_bandPeak[i] = fmaxf(fmaxf(g_bandPeak[i] * agcDecay, avg), agcFloor);
+        float norm = avg / g_bandPeak[i];
+
+        // Adaptive smoothing: lower bands smoother, upper bands snappier
+        float smooth = 0.8f - (float)i * 0.015f; // band 0 = 0.8, band 31 = 0.33
+        if (smooth < 0.3f) smooth = 0.3f;
+
+        if (norm > g_audioParams.bands[i])
+            g_audioParams.bands[i] = g_audioParams.bands[i] * (smooth * 0.5f) + norm * (1.0f - smooth * 0.5f);
+        else
+            g_audioParams.bands[i] = g_audioParams.bands[i] * smooth + norm * (1.0f - smooth);
     }
 }
 
