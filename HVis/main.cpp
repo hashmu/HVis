@@ -81,6 +81,7 @@ static AudioParams g_audioParams = {};
 static PostProcess g_postProcess;
 static PostProcessSettings g_ppSettings;
 static bool g_showPostFX = false;
+static bool g_showUI = true;
 
 // AGC (automatic gain control) — per-band peak tracking
 static float g_bandPeak[32] = {};       // running peak per band
@@ -375,51 +376,60 @@ void RenderFrame() {
 
     ImGuiIO& io = ImGui::GetIO();
 
-    // Fullscreen window
+    // Tab toggles UI visibility
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab))
+        g_showUI = !g_showUI;
+
+    // Fullscreen window (no background/decoration when UI hidden)
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::Begin("##Main", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+    if (!g_showUI) ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGuiWindowFlags mainFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (!g_showUI)
+        mainFlags |= ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar;
+    ImGui::Begin("##Main", nullptr, mainFlags);
 
     float windowW = ImGui::GetContentRegionAvail().x;
     float windowH = ImGui::GetContentRegionAvail().y;
 
-    // Header bar
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "HVis");
+    if (g_showUI) {
+        // Header bar
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "HVis");
 
-    // Vis mode tabs
-    ImGui::SameLine(160);
-    if (ImGui::SmallButton("Waveform/Spectrum")) g_visMode = 0;
-    for (int i = 0; i < g_shaderVis.GetShaderCount(); i++) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton(g_shaderVis.GetShaderName(i))) {
-            g_visMode = 1 + i;
-            g_shaderVis.SetShader(i);
+        // Vis mode tabs
+        ImGui::SameLine(160);
+        if (ImGui::SmallButton("Waveform/Spectrum")) g_visMode = 0;
+        for (int i = 0; i < g_shaderVis.GetShaderCount(); i++) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(g_shaderVis.GetShaderName(i))) {
+                g_visMode = 1 + i;
+                g_shaderVis.SetShader(i);
+            }
         }
+
+        ImGui::SameLine();
+        if (g_visMode > 0) {
+            if (ImGui::SmallButton(g_showPostFX ? "PostFX [-]" : "PostFX [+]"))
+                g_showPostFX = !g_showPostFX;
+        }
+
+        ImGui::SameLine(windowW - 200);
+        if (g_audioOk) {
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI: %dHz %dch",
+                g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: N/A");
+        }
+        ImGui::Separator();
     }
 
-    ImGui::SameLine();
-    if (g_visMode > 0) {
-        if (ImGui::SmallButton(g_showPostFX ? "PostFX [-]" : "PostFX [+]"))
-            g_showPostFX = !g_showPostFX;
-    }
-
-    ImGui::SameLine(windowW - 200);
-    if (g_audioOk) {
-        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "WASAPI: %dHz %dch",
-            g_audioCapture.GetSampleRate(), g_audioCapture.GetChannels());
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Audio: N/A");
-    }
-    ImGui::Separator();
-
-    if (g_visMode == 0) {
+    if (g_visMode == 0 && g_showUI) {
         DrawWaveformSpectrum(windowW, windowH);
-    } else {
+    } else if (g_visMode > 0) {
         // Shader visualization + post-processing
-        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImVec2 avail = g_showUI ? ImGui::GetContentRegionAvail() : io.DisplaySize;
         UINT fullW = (UINT)avail.x;
         UINT fullH = (UINT)avail.y;
         UINT shaderW = max(fullW / 2u, 1u);
@@ -435,15 +445,18 @@ void RenderFrame() {
                 g_audioParams.treble, g_audioParams.energy, g_ppSettings);
 
             ID3D11ShaderResourceView* srv = g_postProcess.GetOutputSRV();
-            if (srv)
+            if (srv) {
+                if (!g_showUI) ImGui::SetCursorPos(ImVec2(0, 0));
                 ImGui::Image((ImTextureID)srv, avail);
+            }
         }
     }
 
     ImGui::End();
+    if (!g_showUI) ImGui::PopStyleVar();
 
     // --- PostFX settings window ---
-    if (g_showPostFX && g_visMode > 0) {
+    if (g_showPostFX && g_visMode > 0 && g_showUI) {
         ImGui::SetNextWindowSize(ImVec2(320, 520), ImGuiCond_FirstUseEver);
         ImGui::Begin("Post Processing", &g_showPostFX);
 
