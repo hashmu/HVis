@@ -1295,19 +1295,23 @@ WaveResult evaluateWaves(float2 xz, float a[6], float q[6]) {
 
     r.normal = normalize(float3(-dh.x, 1.0, -dh.y));
     float J = Jxx * Jzz - Jxz * Jxz;
-    r.foam = saturate(1.0 - J);
+    // Only foam where waves strongly converge, with noise breakup
+    float rawFoam = saturate((0.7 - J) * 2.5);
+    float noiseBreak = frac(sin(dot(xz * 1.7, float2(127.1, 311.7))) * 43758.5453);
+    r.foam = rawFoam * smoothstep(0.1, 0.5, noiseBreak + rawFoam * 0.5);
 
     return r;
 }
 
 float3 sky(float3 rd, float3 sunDir, float3 sunColor) {
-    float3 zenith  = float3(0.15, 0.3, 0.55);
-    float3 horizon = float3(0.6, 0.7, 0.8);
-    float3 col = lerp(horizon, zenith, saturate(rd.y));
+    float3 zenith  = float3(0.08, 0.18, 0.4);
+    float3 horizon = float3(0.3, 0.38, 0.5);
+    float t = saturate(rd.y);
+    float3 col = lerp(horizon, zenith, sqrt(t));
 
     float sunDot = max(dot(rd, sunDir), 0.0);
-    col += sunColor * pow(sunDot, 256.0) * 2.0;
-    col += sunColor * pow(sunDot, 8.0) * 0.15;
+    col += sunColor * pow(sunDot, 512.0) * 1.5;
+    col += sunColor * pow(sunDot, 64.0) * 0.05;
     return col;
 }
 
@@ -1342,7 +1346,7 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float3 rd = normalize(p.x * right - p.y * up + 1.8 * fwd);
 
     // Sun
-    float3 sunDir = normalize(float3(0.6, 0.35, 0.7));
+    float3 sunDir = normalize(float3(1.5, 0.4, 0.5));
     float3 sunColor = float3(1.4, 1.2, 0.9);
 
     // Sky for upward rays
@@ -1424,8 +1428,8 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
             col = lerp(deepCol + sssCol, reflCol, fresnel);
 
             // Foam from Jacobian
-            float foam = w.foam * (0.4 + treble * 0.6);
-            col = lerp(col, float3(0.8, 0.85, 0.9), saturate(foam) * 0.5);
+            float foam = w.foam * (0.5 + treble * 0.8);
+            col = lerp(col, float3(0.85, 0.9, 0.95), saturate(foam) * 0.7);
 
             // Distance fog
             float dist = length(hitPos - ro);
