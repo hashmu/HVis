@@ -713,19 +713,19 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float3 col = skyCol;
 
     // --- Ocean raymarching ---
-    // Any ray that could possibly hit water (camera is above ocean at y=0)
-    if (rd.y < 0.3) {
-        // Flat plane intersection as starting estimate
-        float tFlat = -ro.y / min(rd.y, -0.001);
+    // Only march rays that actually point downward toward the water
+    if (rd.y < -0.001) {
+        // Flat plane intersection at y=0
+        float tFlat = -ro.y / rd.y;
         tFlat = clamp(tFlat, 1.0, 800.0);
 
-        // Step along ray to find ocean surface — more steps, larger range
+        // Step along ray to find ocean surface
         float t = min(tFlat * 0.2, 5.0);
         float tMax = min(tFlat * 2.0, 800.0);
         bool hit = false;
         float3 hitPos = float3(0, 0, 0);
 
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < 48; i++) {
             if (t > tMax) break;
             float3 pos = ro + rd * t;
             float h = oceanHeight(pos.xz);
@@ -733,7 +733,7 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
                 // Binary refine
                 float tA = t - (t * 0.03);
                 float tB = t;
-                for (int j = 0; j < 8; j++) {
+                for (int j = 0; j < 6; j++) {
                     float tM = (tA + tB) * 0.5;
                     float3 pm = ro + rd * tM;
                     if (pm.y < oceanHeight(pm.xz)) tB = tM;
@@ -750,7 +750,7 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         }
 
         // For near-horizon rays that didn't hit geometry, fake a hit at the flat plane
-        if (!hit && tFlat < 600.0) {
+        if (!hit) {
             hitPos = ro + rd * tFlat;
             hit = true;
             t = tFlat;

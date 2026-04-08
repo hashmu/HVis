@@ -519,6 +519,11 @@ void RenderFrame() {
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
     g_pSwapChain->Present(1, 0);
+
+    // Yield to prevent GPU saturation — DXGI_SWAP_EFFECT_DISCARD
+    // doesn't reliably block on Present, so the render loop can
+    // race ahead and keep the GPU pegged at 100%.
+    Sleep(1);
 }
 
 static DWORD WINAPI RenderThreadProc(LPVOID) {
