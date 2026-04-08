@@ -618,7 +618,6 @@ float oceanFBM(float2 p, float t) {
     float freq = 1.0;
     for (int i = 0; i < 5; i++) {
         val += amp * waveNoise(p * freq + float2(t * 0.3 * freq, t * 0.2));
-        // Rotate each octave for more organic feel
         p = float2(p.x * 0.866 - p.y * 0.5, p.x * 0.5 + p.y * 0.866);
         amp *= 0.5;
         freq *= 2.1;

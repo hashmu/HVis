@@ -420,14 +420,16 @@ void RenderFrame() {
     } else {
         // Shader visualization + post-processing
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        UINT texW = (UINT)avail.x;
-        UINT texH = (UINT)avail.y;
-        if (texW > 0 && texH > 0) {
-            g_shaderVis.Resize(texW, texH);
+        UINT fullW = (UINT)avail.x;
+        UINT fullH = (UINT)avail.y;
+        UINT shaderW = max(fullW / 2u, 1u);
+        UINT shaderH = max(fullH / 2u, 1u);
+        if (fullW > 0 && fullH > 0) {
+            g_shaderVis.Resize(shaderW, shaderH);
             g_shaderVis.Render();
 
-            // Post-process pass
-            g_postProcess.Resize(texW, texH);
+            // Post-process at full resolution
+            g_postProcess.Resize(fullW, fullH);
             g_postProcess.Apply(g_shaderVis.GetOutputSRV(), g_time,
                 g_audioParams.bass, g_audioParams.mid,
                 g_audioParams.treble, g_audioParams.energy, g_ppSettings);
