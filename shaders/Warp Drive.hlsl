@@ -123,12 +123,27 @@ float4 main(float4 screenPos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         col += streakCol * streak * (0.3 + bandIdx * 2.0) * warpSpeed * 0.1;
     }
 
-    // === Planets whizzing by ===
-    for (int pi = 0; pi < 3; pi++) {
-        // Each planet has a fixed position in world space, repeats
-        float spacing = 80.0;
+    // === Planets whizzing by (sorted back-to-front) ===
+    float spacing = 80.0;
+    float planetDepths[3];
+    int sortOrder[3] = { 0, 1, 2 };
+
+    // Precompute depths for sorting
+    for (int si = 0; si < 3; si++) {
+        float offset = (float)si * spacing / 3.0;
+        float pz = fmod(camZ + offset, spacing) - spacing * 0.5;
+        planetDepths[si] = pz; // larger = farther behind camera
+    }
+
+    // 3-element sorting network (back-to-front: largest depth first)
+    if (planetDepths[sortOrder[0]] < planetDepths[sortOrder[1]]) { int t = sortOrder[0]; sortOrder[0] = sortOrder[1]; sortOrder[1] = t; }
+    if (planetDepths[sortOrder[1]] < planetDepths[sortOrder[2]]) { int t = sortOrder[1]; sortOrder[1] = sortOrder[2]; sortOrder[2] = t; }
+    if (planetDepths[sortOrder[0]] < planetDepths[sortOrder[1]]) { int t = sortOrder[0]; sortOrder[0] = sortOrder[1]; sortOrder[1] = t; }
+
+    for (int qi = 0; qi < 3; qi++) {
+        int pi = sortOrder[qi];
         float offset = (float)pi * spacing / 3.0;
-        float planetZ = fmod(camZ + offset, spacing) - spacing * 0.5;
+        float planetZ = planetDepths[pi];
 
         float planetSeed = floor((camZ + offset) / spacing) + (float)pi * 17.0;
         float px = (hash(planetSeed * 1.3) - 0.5) * 4.0;
